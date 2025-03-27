@@ -210,52 +210,109 @@ class Person(Scraper):
         url = os.path.join(self.linkedin_url, "details/education")
         self.driver.get(url)
         self.focus()
-        main = self.wait_for_element_to_load(by=By.TAG_NAME, name="main")
-        self.scroll_to_half()
-        self.scroll_to_bottom()
-        main_list = self.wait_for_element_to_load(name="pvs-list__container", base=main)
-        for position in main_list.find_elements(By.CLASS_NAME,"pvs-list__paged-list-item"):
-            position = position.find_element(By.XPATH,"//div[@data-view-name='profile-component-entity']")
-            institution_logo_elem, position_details = position.find_elements(By.XPATH,"*")
-
-            # company elem
-            institution_linkedin_url = institution_logo_elem.find_element(By.XPATH,"*").get_attribute("href")
-
-            # position details
-            position_details_list = position_details.find_elements(By.XPATH,"*")
-            position_summary_details = position_details_list[0] if len(position_details_list) > 0 else None
-            position_summary_text = position_details_list[1] if len(position_details_list) > 1 else None
-            outer_positions = position_summary_details.find_element(By.XPATH,"*").find_elements(By.XPATH,"*")
-
-            institution_name = outer_positions[0].find_element(By.TAG_NAME,"span").text
-            if len(outer_positions) > 1:
-                degree = outer_positions[1].find_element(By.TAG_NAME,"span").text
-            else:
-                degree = None
-
-            if len(outer_positions) > 2:
-                times = outer_positions[2].find_element(By.TAG_NAME,"span").text
-
-                if times != "":
-                    from_date = times.split(" ")[times.split(" ").index("-")-1] if len(times.split(" "))>3 else times.split(" ")[0]
-                    to_date = times.split(" ")[-1]
-            else:
-                from_date = None
-                to_date = None
-
-
-
-            description = position_summary_text.text if position_summary_text else ""
-
-            education = Education(
-                from_date=from_date,
-                to_date=to_date,
-                description=description,
-                degree=degree,
-                institution_name=institution_name,
-                linkedin_url=institution_linkedin_url
+        try: # Add error handling for the whole section
+            main = self.wait_for_element_to_load(by=By.TAG_NAME, name="main")
+            self.scroll_to_half()
+            self.scroll_to_bottom()
+            # Wait specifically for the list items to be present after scrolling
+            WebDriverWait(self.driver, self.__WAIT_FOR_ELEMENT_TIMEOUT).until(
+                EC.presence_of_element_located((By.CLASS_NAME, "pvs-list__paged-list-item"))
             )
-            self.add_education(education)
+            main_list = self.wait_for_element_to_load(name="pvs-list__container", base=main)
+
+            # Find all education items within the list container
+            education_items = main_list.find_elements(By.CLASS_NAME,"pvs-list__paged-list-item")
+            print(f"DEBUG: Found {len(education_items)} education list items.") # Optional Debug Print
+
+            for item in education_items: # Use 'item' instead of 'position' for clarity
+                try: # Add error handling for each item
+                    # Find the core entity div *relative* to the current list item
+                    position_entity = item.find_element(By.XPATH,".//div[@data-view-name='profile-component-entity']")
+
+                    # Extract children relative to the found entity
+                    institution_logo_elem, position_details = position_entity.find_elements(By.XPATH,"*")
+
+                    # company elem
+                    institution_linkedin_url = None
+                    try:
+                        institution_linkedin_url = institution_logo_elem.find_element(By.XPATH,"*").get_attribute("href")
+                    except NoSuchElementException:
+                        print("DEBUG: No LinkedIn URL found for institution logo.")
+
+                    # position details
+                    position_details_list = position_details.find_elements(By.XPATH,"*")
+                    position_summary_details = position_details_list[0] if len(position_details_list) > 0 else None
+                    position_summary_text = position_details_list[1] if len(position_details_list) > 1 else None # Description area
+
+                    if not position_summary_details:
+                        print("DEBUG: Skipping item, could not find summary details.")
+                        continue
+
+                    outer_positions = position_summary_details.find_element(By.XPATH,"*").find_elements(By.XPATH,"*")
+
+                    # --- Extract Details (Keep existing logic, but with safety checks) ---
+                    institution_name = ""
+                    degree = ""
+                    times = ""
+                    from_date = ""
+                    to_date = ""
+
+                    try:
+                        if len(outer_positions) > 0:
+                             # First span usually contains the institution name
+                             institution_name = outer_positions[0].find_element(By.TAG_NAME,"span").text
+                        if len(outer_positions) > 1:
+                             # Second span might contain degree/field
+                             degree = outer_positions[1].find_element(By.TAG_NAME,"span").text
+                        if len(outer_positions) > 2:
+                             # Third span might contain dates
+                             times = outer_positions[2].find_element(By.TAG_NAME,"span").text
+                    except NoSuchElementException:
+                        print("DEBUG: Could not extract all details (name/degree/dates) using standard structure.")
+
+
+                    # Parse Dates (more robustly)
+                    if times:
+                        parts = times.split('–') # Use '–' (en dash) which LinkedIn often uses
+                        if len(parts) == 2:
+                            from_date = parts[0].strip()
+                            to_date = parts[1].strip()
+                        elif len(parts) == 1: # Only one year listed
+                             from_date = parts[0].strip()
+                             to_date = parts[0].strip() # Or set to None, depending on preference
+
+                    description = ""
+                    if position_summary_text:
+                         # Check for nested activities/description text
+                         try:
+                            description_spans = position_summary_text.find_elements(By.CSS_SELECTOR, ".pv-shared-text-with-see-more span[aria-hidden='true']")
+                            if description_spans:
+                                description = description_spans[0].text
+                            else: # Fallback if specific span not found
+                                 description = position_summary_text.text # Might include "See more"
+                         except NoSuchElementException:
+                             description = position_summary_text.text # Fallback
+
+                    print(f"DEBUG: Extracted Edu: Inst='{institution_name}', Deg='{degree}', From='{from_date}', To='{to_date}'") # Optional Debug
+
+                    # Create and add Education object
+                    education = Education(
+                        from_date=from_date,
+                        to_date=to_date,
+                        description=description.strip(), # Clean description
+                        degree=degree,
+                        institution_name=institution_name,
+                        linkedin_url=institution_linkedin_url
+                    )
+                    self.add_education(education)
+
+                except Exception as e_item:
+                    print(f"[ERROR] Failed to process one education item: {e_item}")
+                    # Optionally continue to the next item instead of stopping
+                    continue
+
+        except Exception as e_main:
+             print(f"[ERROR] Failed during get_educations main process: {e_main}")
 
     def get_name_and_location(self):
         top_panel = self.driver.find_element(By.XPATH, "//*[@class='mt2 relative']")
